@@ -66,7 +66,10 @@ impl VestingContract {
         end_time: u64,
     ) {
         assert!(total_amount > 0, "Total amount must be positive");
-        assert!(start_time <= cliff_time && cliff_time <= end_time, "Invalid vesting times");
+        assert!(
+            start_time <= cliff_time && cliff_time <= end_time,
+            "Invalid vesting times"
+        );
 
         let admin: Address = env
             .storage()
@@ -77,16 +80,15 @@ impl VestingContract {
 
         let schedule_key = StorageKey::Vesting(beneficiary.clone());
         let claims_key = StorageKey::Claims(beneficiary.clone());
-        let existing_schedule: Option<VestingSchedule> = env.storage().persistent().get(&schedule_key);
-        let existing_claims: Option<Vec<PartialClaim>> = env.storage().persistent().get(&claims_key);
+        let existing_schedule: Option<VestingSchedule> =
+            env.storage().persistent().get(&schedule_key);
+        let existing_claims: Option<Vec<PartialClaim>> =
+            env.storage().persistent().get(&claims_key);
         assert!(
             existing_schedule.is_none(),
             "Vesting schedule already exists"
         );
-        assert!(
-            existing_claims.is_none(),
-            "Claim ledger already exists"
-        );
+        assert!(existing_claims.is_none(), "Claim ledger already exists");
 
         let schedule = VestingSchedule {
             total_amount,
@@ -106,7 +108,8 @@ impl VestingContract {
             end_time,
             timestamp: env.ledger().timestamp(),
         };
-        env.events().publish(("vesting", symbol_short!("created")), event);
+        env.events()
+            .publish(("vesting", symbol_short!("created")), event);
     }
 
     /// Claims vested tokens for a beneficiary.
@@ -123,6 +126,15 @@ impl VestingContract {
             .persistent()
             .get(&schedule_key)
             .expect("Vesting schedule not found");
+        assert!(
+            schedule.total_amount > 0,
+            "Vesting schedule total amount is invalid"
+        );
+        assert!(schedule.claimed >= 0, "Claim cursor cannot be negative");
+        assert!(
+            schedule.claimed <= schedule.total_amount,
+            "Claim cursor exceeds total vesting amount"
+        );
 
         let current_time = env.ledger().timestamp();
         let vested = Self::calculate_vested(&schedule, current_time);
@@ -161,9 +173,7 @@ impl VestingContract {
         claims.push_back(claim);
 
         env.storage().persistent().set(&claims_key, &claims);
-        env.storage()
-            .persistent()
-            .set(&schedule_key, &schedule);
+        env.storage().persistent().set(&schedule_key, &schedule);
 
         let event = PartialClaimEvent {
             beneficiary: beneficiary.clone(),
@@ -171,7 +181,8 @@ impl VestingContract {
             timestamp: current_time,
             total_claimed: schedule.claimed,
         };
-        env.events().publish(("vesting", symbol_short!("claimed")), event);
+        env.events()
+            .publish(("vesting", symbol_short!("claimed")), event);
 
         assert!(
             Self::sum_claims(&claims) == schedule.claimed,
@@ -205,7 +216,11 @@ impl VestingContract {
         } else {
             let elapsed = current_time - schedule.cliff_time;
             let vesting_duration = schedule.end_time - schedule.cliff_time;
-            (schedule.total_amount * elapsed as i128) / vesting_duration as i128
+            let vested_numerator = schedule
+                .total_amount
+                .checked_mul(elapsed as i128)
+                .expect("Vested amount calculation overflowed");
+            vested_numerator / vesting_duration as i128
         }
     }
 }

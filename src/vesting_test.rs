@@ -103,6 +103,7 @@ mod tests {
         assert_eq!(claims.len(), 2);
         assert_eq!(claims.get(1).unwrap().amount, 125);
         assert_eq!(claims.get(1).unwrap().total_claimed, 375);
+        assert_eq!(VestingContract::sum_claims(&claims), schedule.claimed);
     }
 
     #[test]
@@ -234,6 +235,60 @@ mod tests {
             .set(&StorageKey::Claims(beneficiary.clone()), &claims);
 
         env.ledger().set_timestamp(2600);
+        VestingContract::claim(env.clone(), beneficiary, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Claim cursor exceeds total vesting amount")]
+    fn test_claim_rejects_cursor_past_total_amount() {
+        let env = Env::default();
+        let contract_id = Address::random(&env);
+        env.register_contract(&contract_id, VestingContract);
+
+        let admin = Address::random(&env);
+        VestingContract::initialize(env.clone(), admin);
+        env.mock_all_auths();
+
+        let beneficiary = Address::random(&env);
+        let schedule = VestingSchedule {
+            total_amount: 1000,
+            start_time: 1000,
+            cliff_time: 2000,
+            end_time: 3000,
+            claimed: 1200,
+        };
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Vesting(beneficiary.clone()), &schedule);
+
+        env.ledger().set_timestamp(2600);
+        VestingContract::claim(env.clone(), beneficiary, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vested amount calculation overflowed")]
+    fn test_claim_rejects_vested_overflow() {
+        let env = Env::default();
+        let contract_id = Address::random(&env);
+        env.register_contract(&contract_id, VestingContract);
+
+        let admin = Address::random(&env);
+        VestingContract::initialize(env.clone(), admin);
+        env.mock_all_auths();
+
+        let beneficiary = Address::random(&env);
+        let schedule = VestingSchedule {
+            total_amount: (i128::MAX / 2) + 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 3,
+            claimed: 0,
+        };
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Vesting(beneficiary.clone()), &schedule);
+
+        env.ledger().set_timestamp(2);
         VestingContract::claim(env.clone(), beneficiary, 1);
     }
 
