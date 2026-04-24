@@ -30,6 +30,7 @@ Each beneficiary has an append-only ledger of partial claims stored as a vector 
 ## Security Notes
 - Partial claims reduce settlement risk, but the contract still enforces the same invariant as a full claim: no claim can exceed vested balance.
 - The cursor/ledger check prevents "dust loss" style accounting drift and makes mismatches fail loudly.
+- Vesting schedule creation is admin-gated; claims are beneficiary-gated.
 - Claims are authorized by the beneficiary before state changes are accepted.
 - Event payloads remain on schema version 1.0 and are documented in `vesting-event-schema-versioning.md`.
 - Ledger changes do not change the event schema, so no version bump is required unless the event fields themselves change.
