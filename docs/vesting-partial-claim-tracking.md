@@ -4,26 +4,32 @@
 This document describes the mechanism for tracking partial claims in the vesting contract to ensure consistency and prevent math breakage.
 
 ## Partial Claim Ledger
-Each beneficiary has a ledger of partial claims stored as a vector of `PartialClaim` structs.
+Each beneficiary has an append-only ledger of partial claims stored as a vector of `PartialClaim` structs.
 
 ### PartialClaim Struct
 - amount: i128 - The amount claimed in this partial claim
 - timestamp: u64 - The timestamp of the claim
+- total_claimed: i128 - The cumulative cursor after this claim is applied
 
-### Cursor/Tracking
-- The total claimed amount is tracked in the `VestingSchedule.claimed` field.
-- Each partial claim is appended to the claims vector for auditability.
-- Claims are validated against the vested amount at the time of claim to prevent over-claiming.
+### Cursor / Ledger Relationship
+- `VestingSchedule.claimed` is the authoritative cursor for how much has already been released.
+- The `PartialClaim` vector is the audit ledger for the same beneficiary.
+- Each new ledger entry stores the claim amount and the post-claim cursor in `total_claimed`.
+- Before appending a new claim, the contract reconciles the last ledger entry against `VestingSchedule.claimed`.
+- If the cursor and ledger disagree, the claim fails explicitly instead of silently mutating balances.
 
 ## Invariants
-- Total claimed <= vested amount at any time
-- Sum of partial claims == total claimed
-- No negative claims allowed
-- Claims only increase total claimed
+- `0 <= claimed <= total_amount`
+- `sum(ledger.amount) == VestingSchedule.claimed`
+- `ledger.last().total_claimed == VestingSchedule.claimed`
+- Claims only increase the cursor
+- Claims before the cliff or above the vested amount fail explicitly
+- Zero or negative claim amounts fail explicitly
+- A zero-duration vesting schedule is safe and cannot divide by zero
 
 ## Security Notes
-- Partial claims prevent large single transactions that could be frontrun or cause liquidity issues.
-- Tracking ensures no "dust loss" and maintains investor trust by making failures explicit.
-- All claims are validated against vested amounts to prevent over-claiming.
-- Events are emitted for each claim with schema version 1.0 for transparency.
-- Beneficiary must authorize each claim to prevent unauthorized withdrawals.
+- Partial claims reduce settlement risk, but the contract still enforces the same invariant as a full claim: no claim can exceed vested balance.
+- The cursor/ledger check prevents "dust loss" style accounting drift and makes mismatches fail loudly.
+- Claims are authorized by the beneficiary before state changes are accepted.
+- Event payloads remain on schema version 1.0 and are documented in `vesting-event-schema-versioning.md`.
+- Ledger changes do not change the event schema, so no version bump is required unless the event fields themselves change.

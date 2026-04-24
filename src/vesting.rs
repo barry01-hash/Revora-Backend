@@ -1,6 +1,12 @@
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, Vec, symbol_short};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Vec};
 
-const SCHEMA_VERSION: &str = "1.0";
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StorageKey {
+    Admin,
+    Vesting(Address),
+    Claims(Address),
+}
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +27,8 @@ pub struct PartialClaimEvent {
     pub timestamp: u64,
     pub total_claimed: i128,
 }
+
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VestingSchedule {
     pub total_amount: i128,
@@ -35,6 +43,7 @@ pub struct VestingSchedule {
 pub struct PartialClaim {
     pub amount: i128,
     pub timestamp: u64,
+    pub total_claimed: i128,
 }
 
 #[contract]
@@ -42,10 +51,12 @@ pub struct VestingContract;
 
 #[contractimpl]
 impl VestingContract {
+    /// Initializes the vesting contract admin.
     pub fn initialize(env: Env, admin: Address) {
-        env.storage().instance().set(&"admin", &admin);
+        env.storage().instance().set(&StorageKey::Admin, &admin);
     }
 
+    /// Creates a vesting schedule for a beneficiary.
     pub fn create_vesting(
         env: Env,
         beneficiary: Address,
@@ -54,8 +65,28 @@ impl VestingContract {
         cliff_time: u64,
         end_time: u64,
     ) {
-        // Validate times
+        assert!(total_amount > 0, "Total amount must be positive");
         assert!(start_time <= cliff_time && cliff_time <= end_time, "Invalid vesting times");
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("Contract admin not initialized");
+        admin.require_auth();
+
+        let schedule_key = StorageKey::Vesting(beneficiary.clone());
+        let claims_key = StorageKey::Claims(beneficiary.clone());
+        let existing_schedule: Option<VestingSchedule> = env.storage().persistent().get(&schedule_key);
+        let existing_claims: Option<Vec<PartialClaim>> = env.storage().persistent().get(&claims_key);
+        assert!(
+            existing_schedule.is_none(),
+            "Vesting schedule already exists"
+        );
+        assert!(
+            existing_claims.is_none(),
+            "Claim ledger already exists"
+        );
 
         let schedule = VestingSchedule {
             total_amount,
@@ -65,9 +96,8 @@ impl VestingContract {
             claimed: 0,
         };
 
-        env.storage().persistent().set(&beneficiary, &schedule);
+        env.storage().persistent().set(&schedule_key, &schedule);
 
-        // Emit event
         let event = VestingCreatedEvent {
             beneficiary: beneficiary.clone(),
             total_amount,
@@ -79,32 +109,62 @@ impl VestingContract {
         env.events().publish(("vesting", symbol_short!("created")), event);
     }
 
+    /// Claims vested tokens for a beneficiary.
     pub fn claim(env: Env, beneficiary: Address, amount: i128) {
         beneficiary.require_auth();
 
-        let mut schedule: VestingSchedule = env.storage().persistent().get(&beneficiary).unwrap();
+        assert!(amount > 0, "Claim amount must be positive");
+
+        let schedule_key = StorageKey::Vesting(beneficiary.clone());
+        let claims_key = StorageKey::Claims(beneficiary.clone());
+
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .persistent()
+            .get(&schedule_key)
+            .expect("Vesting schedule not found");
 
         let current_time = env.ledger().timestamp();
         let vested = Self::calculate_vested(&schedule, current_time);
 
-        assert!(vested >= schedule.claimed + amount, "Claim amount exceeds vested amount");
-        assert!(amount > 0, "Claim amount must be positive");
+        let mut claims: Vec<PartialClaim> = match env.storage().persistent().get(&claims_key) {
+            Some(claims) => claims,
+            None => Vec::new(&env),
+        };
 
-        schedule.claimed += amount;
+        if claims.len() > 0 {
+            let last_claim = claims
+                .get(claims.len() - 1)
+                .expect("Claim ledger is missing its last entry");
+            assert!(
+                last_claim.total_claimed == schedule.claimed,
+                "Claim ledger and schedule cursor are inconsistent"
+            );
+        }
 
-        // Record partial claim
+        let next_total_claimed = schedule
+            .claimed
+            .checked_add(amount)
+            .expect("Claim amount overflowed the schedule cursor");
+        assert!(
+            vested >= next_total_claimed,
+            "Claim amount exceeds vested amount"
+        );
+        schedule.claimed = next_total_claimed;
+
         let claim = PartialClaim {
             amount,
             timestamp: current_time,
+            total_claimed: next_total_claimed,
         };
 
-        let mut claims: Vec<PartialClaim> = env.storage().persistent().get(&(&beneficiary, "claims")).unwrap_or(Vec::new(&env));
         claims.push_back(claim);
 
-        env.storage().persistent().set(&(&beneficiary, "claims"), &claims);
-        env.storage().persistent().set(&beneficiary, &schedule);
+        env.storage().persistent().set(&claims_key, &claims);
+        env.storage()
+            .persistent()
+            .set(&schedule_key, &schedule);
 
-        // Emit event
         let event = PartialClaimEvent {
             beneficiary: beneficiary.clone(),
             amount,
@@ -113,13 +173,33 @@ impl VestingContract {
         };
         env.events().publish(("vesting", symbol_short!("claimed")), event);
 
-        // Transfer tokens (assuming token contract exists)
-        // For now, just log
+        assert!(
+            Self::sum_claims(&claims) == schedule.claimed,
+            "Claim ledger does not match schedule cursor"
+        );
+    }
+
+    fn sum_claims(claims: &Vec<PartialClaim>) -> i128 {
+        let mut total = 0i128;
+        let len = claims.len();
+
+        let mut i: u32 = 0;
+        while i < len {
+            let claim = claims.get(i).expect("Claim ledger entry missing");
+            total = total
+                .checked_add(claim.amount)
+                .expect("Claim ledger overflowed while reconciling");
+            i += 1;
+        }
+
+        total
     }
 
     pub(crate) fn calculate_vested(schedule: &VestingSchedule, current_time: u64) -> i128 {
         if current_time < schedule.cliff_time {
             0
+        } else if schedule.cliff_time == schedule.end_time {
+            schedule.total_amount
         } else if current_time >= schedule.end_time {
             schedule.total_amount
         } else {
