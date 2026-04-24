@@ -23,5 +23,7 @@ Each beneficiary has a ledger of partial claims stored as a vector of `PartialCl
 
 ## Security Notes
 - Partial claims prevent large single transactions that could be frontrun or cause liquidity issues.
-- Tracking ensures no "dust loss" and maintains investor trust.
-- Events are emitted for each claim with schema version 1.0.
+- Tracking ensures no "dust loss" and maintains investor trust by making failures explicit.
+- All claims are validated against vested amounts to prevent over-claiming.
+- Events are emitted for each claim with schema version 1.0 for transparency.
+- Beneficiary must authorize each claim to prevent unauthorized withdrawals.
